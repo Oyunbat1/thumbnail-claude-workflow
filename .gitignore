@@ -1,0 +1,15 @@
+# Environment variables — never commit real keys
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Output files
+output/
+illustrations/
+
+# OS
+.DS_Store
+Thumbs.db
