@@ -46,10 +46,10 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 WIDTH  = 1280
 HEIGHT = 720
 
-# Brand colors
-BG_COLOR        = "#080c14"       # Very dark base
-ACCENT_COLOR    = "#5DC9B4"       # Lambda teal
-ACCENT_DARK     = "#0d1520"       # Dark text on teal box
+# Brand colors — sourced from brand/Typography.PNG
+BG_COLOR        = "#080c14"       # Very dark navy base
+ACCENT_COLOR    = "#5DC9B4"       # Lambda teal (primary brand accent)
+ACCENT_DARK     = "#0d1520"       # Dark text on teal box (derived from BG_COLOR)
 TOPIC_COLOR     = "#ffffff"       # Main topic text
 
 # Face
@@ -95,10 +95,16 @@ def load_font(size):
     if FONT_PATH and os.path.exists(FONT_PATH):
         return ImageFont.truetype(FONT_PATH, size)
     for name in [
+        # macOS — Cyrillic/Mongolian support
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+        # Windows
         "C:/Windows/Fonts/arialbd.ttf",
         "C:/Windows/Fonts/arial.ttf",
         "C:/Windows/Fonts/calibrib.ttf",
         "C:/Windows/Fonts/segoeui.ttf",
+        # Linux
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]:
         if os.path.exists(name):
@@ -163,18 +169,21 @@ def wrap_text(text, font, max_width, draw):
 
 def create_gradient_bg(face_x_center=WIDTH//4):
     """Dark gradient with subtle radial glow behind face + faint teal top-right."""
-    # Base: very dark navy
-    bg = Image.new("RGBA", (WIDTH, HEIGHT), (*hex_to_rgb(BG_COLOR), 255))
+    bg_rgb = hex_to_rgb(BG_COLOR)
 
-    # Left glow behind face — soft dark-blue radial
+    # Base: brand dark navy
+    bg = Image.new("RGBA", (WIDTH, HEIGHT), (*bg_rgb, 255))
+
+    # Left glow behind face — soft dark-blue radial (brightened BG_COLOR)
     glow1 = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     gd1 = ImageDraw.Draw(glow1)
     cx, cy = face_x_center, HEIGHT // 2 + 40
-    gd1.ellipse([cx-350, cy-350, cx+350, cy+350], fill=(20, 35, 65, 160))
+    glow_face_color = (bg_rgb[0]*2+4, bg_rgb[1]*3+11, bg_rgb[2]*3+29, 160)
+    gd1.ellipse([cx-350, cy-350, cx+350, cy+350], fill=glow_face_color)
     glow1 = glow1.filter(ImageFilter.GaussianBlur(90))
     bg = Image.alpha_composite(bg, glow1)
 
-    # Top-right teal accent glow (very subtle)
+    # Top-right brand teal accent glow (very subtle)
     glow2 = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     gd2 = ImageDraw.Draw(glow2)
     gd2.ellipse([WIDTH-300, -150, WIDTH+100, 250], fill=(*hex_to_rgb(ACCENT_COLOR), 35))
@@ -186,7 +195,7 @@ def create_gradient_bg(face_x_center=WIDTH//4):
     vd = ImageDraw.Draw(vig)
     for x in range(WIDTH//2, WIDTH):
         alpha = int(30 * ((x - WIDTH//2) / (WIDTH//2)))
-        vd.line([(x, 0), (x, HEIGHT)], fill=(4, 6, 12, alpha))
+        vd.line([(x, 0), (x, HEIGHT)], fill=(*bg_rgb, alpha))
     bg = Image.alpha_composite(bg, vig)
 
     return bg
@@ -405,8 +414,8 @@ def generate_thumbnail(name, topic, topic_highlight, face_path, output_path, ill
         illus_img = generate_illustration(illustration_prompt)
         if illus_img:
             bg = illus_img.resize((WIDTH, HEIGHT), Image.LANCZOS).convert("RGBA")
-            # Dark overlay so face and text pop
-            dark_over = Image.new("RGBA", (WIDTH, HEIGHT), (5, 10, 20, BG_OVERLAY_OPACITY))
+            # Dark overlay using brand BG_COLOR so face and text pop
+            dark_over = Image.new("RGBA", (WIDTH, HEIGHT), (*hex_to_rgb(BG_COLOR), BG_OVERLAY_OPACITY))
             bg = Image.alpha_composite(bg, dark_over)
         else:
             bg = Image.new("RGBA", (WIDTH, HEIGHT), hex_to_rgba(BG_COLOR))
@@ -423,7 +432,9 @@ def generate_thumbnail(name, topic, topic_highlight, face_path, output_path, ill
         # Left face glow
         gd = ImageDraw.Draw(glow_overlay)
         cx, cy = WIDTH // 4, HEIGHT // 2 + 40
-        gd.ellipse([cx-320, cy-320, cx+320, cy+320], fill=(15, 25, 50, 80))
+        bg_rgb = hex_to_rgb(BG_COLOR)
+        glow_face_color = (bg_rgb[0]*2+4, bg_rgb[1]*3+1, bg_rgb[2]*2+10, 80)
+        gd.ellipse([cx-320, cy-320, cx+320, cy+320], fill=glow_face_color)
         glow_overlay = glow_overlay.filter(ImageFilter.GaussianBlur(80))
         bg = Image.alpha_composite(bg, glow_overlay)
 
