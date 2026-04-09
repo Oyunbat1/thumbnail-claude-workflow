@@ -1,28 +1,11 @@
-"""
-YouTube Thumbnail Generator
-============================
-Viral-style: face-left, text-right, clean dark gradient bg, bold highlight box.
 
-CSV columns: name, topic, topic_highlight, photo_filename, illustration_prompt
-  - topic_highlight: the big keyword in the teal accent box (e.g. "ВЭ?", "БҮТЭЭХ")
-  - illustration_prompt: optional, leave blank to auto-generate
-  - topic_highlight: optional, leave blank to auto-extract last word
 
-Requirements:
-    pip install Pillow
-
-Usage:
-    1. Put face photos in "faces/"
-    2. Fill in "thumbnails.csv"
-    3. Run: python thumbnail_generator.py
-    4. Find thumbnails in "output/"
-"""
-
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance, ImageOps
 import csv
 import os
 import sys
 import hashlib
+import random
 
 # Load .env file if present (no external dependencies required)
 _env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -46,27 +29,54 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 WIDTH  = 1280
 HEIGHT = 720
 
-# Brand colors — sourced from brand/Typography.PNG
-BG_COLOR        = "#080c14"       # Very dark navy base
-ACCENT_COLOR    = "#5DC9B4"       # Lambda teal (primary brand accent)
-ACCENT_DARK     = "#0d1520"       # Dark text on teal box (derived from BG_COLOR)
-TOPIC_COLOR     = "#ffffff"       # Main topic text
+# Brand colors — Lambda (shared)
+ACCENT_COLOR    = "#4CC9A0"       # Lambda mint teal-green
+ACCENT_DARK     = "#FFFFFF"       # Text on teal boxes
+
+# Style alternation: "alternate", "random", "dark", "bright"
+STYLE_MODE = "alternate"
+
+# Per-style settings
+STYLES = {
+    "dark": {
+        "bg_color":     "#0A0F1A",   # Very dark navy
+        "topic_color":  "#FFFFFF",   # White text
+        "overlay":      (5, 20, 12, 165),   # Dark green overlay on illustration
+        "text_stroke":  (0, 0, 0, 220),     # Black stroke for white text
+        "face_stroke":  (255, 255, 255, 255),
+        "logo_color":   (255, 255, 255),
+        "prompt_style": "dark cinematic moody dramatic teal glow professional wide 16:9",
+    },
+    "bright": {
+        "bg_color":     "#F0FAF6",   # Very light teal-white
+        "topic_color":  "#0D1B2A",   # Dark navy text
+        "overlay":      (240, 250, 246, 120),  # Light teal-white wash on illustration
+        "text_stroke":  (255, 255, 255, 160),  # White halo for dark text
+        "face_stroke":  (76, 201, 160, 200),   # Teal stroke = ACCENT_COLOR
+        "logo_color":   (13, 27, 42),
+        "prompt_style": "bright airy clean modern professional light studio minimal wide 16:9",
+    },
+}
+
+# Kept for fallback references
+BG_COLOR    = STYLES["dark"]["bg_color"]
+TOPIC_COLOR = STYLES["dark"]["topic_color"]
 
 # Face
-FACE_HEIGHT_RATIO = 0.75          # Face height as fraction of canvas (0.98=huge, 0.75=medium, 0.60=small)
+FACE_HEIGHT_RATIO = 0.85          # Face height as frction of canvas (0.98=huge, 0.75=medium, 0.60=small)
 FACE_VERTICAL     = "bottom"      # "bottom" = anchor to bottom, "center" = vertically centered
 FACE_X_OFFSET     = 90            # Pixels from left edge (higher = more right)
 USE_BG_REMOVAL    = True
 
 # Text sizes
 NAME_FONT_SIZE      = 38
-TOPIC_FONT_SIZE     = 58          # Big bold main text (6 words or fewer)
+TOPIC_FONT_SIZE     = 68          # Big bold main text (6 words or fewer)
 HIGHLIGHT_FONT_SIZE = 28          # Keyword in teal box
 TOPIC_MAX_WIDTH     = 560         # Right-side text column width
 
 # Background
-USE_GRADIENT_BG    = True         # Overlay glow effects on top of illustration
-USE_ILLUSTRATIONS  = True         # Generate AI background illustrations
+USE_GRADIENT_BG    = True         # Glow effects layered on illustration
+USE_ILLUSTRATIONS  = True         # AI illustration per topic
 ILLUSTRATION_AS_BG = True         # Use illustration as full background
 
 # Replicate API
@@ -85,7 +95,7 @@ LOGO_SIZE = (280, 280)
 CSV_FILE     = "thumbnails.csv"
 FACES_FOLDER = "faces"
 OUTPUT_FOLDER = "output"
-FONT_PATH     = None
+FONT_PATH     = "brand/NotoSans-Bold.ttf"
 
 # =============================================================
 # HELPERS
@@ -95,17 +105,16 @@ def load_font(size):
     if FONT_PATH and os.path.exists(FONT_PATH):
         return ImageFont.truetype(FONT_PATH, size)
     for name in [
-        # macOS — Cyrillic/Mongolian support
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/Library/Fonts/Arial Unicode.ttf",
-        # Windows
+        "/System/Library/Fonts/Supplemental/Verdana Bold.ttf",
         "C:/Windows/Fonts/arialbd.ttf",
         "C:/Windows/Fonts/arial.ttf",
         "C:/Windows/Fonts/calibrib.ttf",
         "C:/Windows/Fonts/segoeui.ttf",
         # Linux
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/System/Library/Fonts/ArialHB.ttc",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/HelveticaNeue.ttc",
     ]:
         if os.path.exists(name):
             return ImageFont.truetype(name, size)
@@ -122,9 +131,17 @@ def hex_to_rgba(h, a=255):
     return (r, g, b, a)
 
 
-def prepare_logo(path, size):
+def prepare_logo(path, size, recolor=None):
+    """Load logo, resize, and optionally recolor white pixels to a target color."""
     logo = Image.open(path).convert("RGBA")
     logo.thumbnail(size, Image.LANCZOS)
+    if recolor:
+        r, g, b = recolor
+        data = logo.getdata()
+        logo.putdata([
+            (r, g, b, a) if a > 10 else (0, 0, 0, 0)
+            for (_, _, _, a) in data
+        ])
     return logo
 
 
@@ -167,36 +184,36 @@ def wrap_text(text, font, max_width, draw):
     return lines
 
 
-def create_gradient_bg(face_x_center=WIDTH//4):
-    """Dark gradient with subtle radial glow behind face + faint teal top-right."""
-    bg_rgb = hex_to_rgb(BG_COLOR)
+def create_gradient_bg(face_x_center=WIDTH//4, style="dark"):
+    """Glow background — dark moody or bright airy depending on style."""
+    s = STYLES[style]
+    bg = Image.new("RGBA", (WIDTH, HEIGHT), (*hex_to_rgb(s["bg_color"]), 255))
+    accent = hex_to_rgb(ACCENT_COLOR)
+    cx, cy = face_x_center, HEIGHT // 2
 
-    # Base: brand dark navy
-    bg = Image.new("RGBA", (WIDTH, HEIGHT), (*bg_rgb, 255))
+    if style == "dark":
+        # Dark: deep glow behind face + subtle teal top-right
+        glow1 = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+        ImageDraw.Draw(glow1).ellipse([cx-350, cy-350, cx+350, cy+350], fill=(10, 25, 50, 160))
+        bg = Image.alpha_composite(bg, glow1.filter(ImageFilter.GaussianBlur(90)))
 
-    # Left glow behind face — soft dark-blue radial (brightened BG_COLOR)
-    glow1 = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    gd1 = ImageDraw.Draw(glow1)
-    cx, cy = face_x_center, HEIGHT // 2 + 40
-    glow_face_color = (bg_rgb[0]*2+4, bg_rgb[1]*3+11, bg_rgb[2]*3+29, 160)
-    gd1.ellipse([cx-350, cy-350, cx+350, cy+350], fill=glow_face_color)
-    glow1 = glow1.filter(ImageFilter.GaussianBlur(90))
-    bg = Image.alpha_composite(bg, glow1)
+        glow2 = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+        ImageDraw.Draw(glow2).ellipse([WIDTH-300, -150, WIDTH+100, 250], fill=(*accent, 40))
+        bg = Image.alpha_composite(bg, glow2.filter(ImageFilter.GaussianBlur(70)))
+    else:
+        # Bright: soft teal bloom behind face + corner accent
+        glow1 = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+        ImageDraw.Draw(glow1).ellipse([cx-420, cy-380, cx+420, cy+380], fill=(*accent, 45))
+        bg = Image.alpha_composite(bg, glow1.filter(ImageFilter.GaussianBlur(110)))
 
-    # Top-right brand teal accent glow (very subtle)
-    glow2 = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    gd2 = ImageDraw.Draw(glow2)
-    gd2.ellipse([WIDTH-300, -150, WIDTH+100, 250], fill=(*hex_to_rgb(ACCENT_COLOR), 35))
-    glow2 = glow2.filter(ImageFilter.GaussianBlur(70))
-    bg = Image.alpha_composite(bg, glow2)
+        glow2 = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+        ImageDraw.Draw(glow2).ellipse([WIDTH-280, -120, WIDTH+80, 220], fill=(*accent, 28))
+        bg = Image.alpha_composite(bg, glow2.filter(ImageFilter.GaussianBlur(80)))
 
-    # Bottom-right dark vignette to separate face from text side
-    vig = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    vd = ImageDraw.Draw(vig)
-    for x in range(WIDTH//2, WIDTH):
-        alpha = int(30 * ((x - WIDTH//2) / (WIDTH//2)))
-        vd.line([(x, 0), (x, HEIGHT)], fill=(*bg_rgb, alpha))
-    bg = Image.alpha_composite(bg, vig)
+        glow3 = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+        ImageDraw.Draw(glow3).ellipse([WIDTH//2-300, HEIGHT-200, WIDTH//2+300, HEIGHT+200],
+                                      fill=(*accent, 18))
+        bg = Image.alpha_composite(bg, glow3.filter(ImageFilter.GaussianBlur(90)))
 
     return bg
 
@@ -269,13 +286,16 @@ def _replicate_post_versioned(version_hash, input_data, label="Replicate"):
     return None
 
 
-def auto_generate_prompt(topic):
-    """Keyword → cinematic prompt mapping for Mongolian topics."""
+def auto_generate_prompt(topic, style="dark"):
+    """Keyword → prompt mapping for Mongolian topics, with dark/bright variants."""
     t = topic.lower()
-    mapping = {
+    dark_map = {
         "ai":       "futuristic AI neural network glowing teal nodes dark space cinematic wide 16:9",
         "хиймэл":   "futuristic AI neural network glowing teal nodes dark space cinematic wide 16:9",
+        "gemini":   "Google Gemini AI holographic interface dark space teal glow cinematic wide",
         "chatgpt":  "holographic AI chat interface dark space teal neon glow futuristic cinematic wide",
+        "claude":   "futuristic AI assistant glowing teal hologram dark cinematic wide",
+        "perplexity":"AI search engine glowing data streams dark space teal cinematic wide",
         "шинжилгээ":"futuristic data visualization glowing charts dark blue teal cinematic wide",
         "мэдээлэл": "futuristic data visualization glowing charts dark blue teal cinematic wide",
         "бичлэг":   "cinematic video production studio camera equipment dramatic dark background wide",
@@ -290,23 +310,50 @@ def auto_generate_prompt(topic):
         "санхүү":   "futuristic finance dashboard glowing gold teal coins dark cinematic wide",
         "эрүүл":    "sleek gym dramatic lighting silhouette teal accent motivational cinematic wide",
         "сур":      "futuristic digital classroom glowing holographic books teal cinematic wide",
+        "labor":    "modern HR office bright city skyline professional workspace teal cinematic wide",
+        "ажилтн":   "professional modern office workspace clean teal accent cinematic wide",
     }
+    bright_map = {
+        "ai":       "clean modern tech desk white background holographic AI display minimal bright",
+        "хиймэл":   "clean modern tech desk white background holographic AI display minimal bright",
+        "gemini":   "bright modern workspace Google colors clean minimal professional wide",
+        "chatgpt":  "bright clean office laptop chat interface minimal white professional wide",
+        "claude":   "bright airy tech workspace minimal holographic interface clean professional wide",
+        "perplexity":"bright open office search interface clean minimal professional light wide",
+        "шинжилгээ":"bright clean data dashboard light minimal modern office professional wide",
+        "мэдээлэл": "bright clean data dashboard light minimal modern office professional wide",
+        "бичлэг":   "bright modern studio clean white camera gear minimal professional wide",
+        "видео":    "bright modern studio clean white camera gear minimal professional wide",
+        "автомат":  "bright clean industrial design minimal automation robot white professional wide",
+        "байгуулла":"bright corporate office panoramic window clean minimal professional wide",
+        "маркетинг":"bright clean social media dashboard light modern minimal professional wide",
+        "мөнгө":    "bright clean finance desk light minimal coins modern professional wide",
+        "санхүү":   "bright clean finance desk light minimal modern professional wide",
+        "эрүүл":    "bright airy gym natural light clean minimal motivational professional wide",
+        "сур":      "bright clean classroom natural light books minimal modern professional wide",
+        "labor":    "bright open modern office natural light minimal HR professional wide",
+        "ажилтн":   "bright airy modern office workspace natural light clean minimal wide",
+    }
+    mapping = dark_map if style == "dark" else bright_map
     for kw, scene in mapping.items():
         if kw in t:
             return scene
-    return "cinematic dark studio dramatic teal accent glow professional futuristic wide 16:9"
+    if style == "dark":
+        return "cinematic dark studio dramatic teal accent glow professional futuristic wide 16:9"
+    return "bright airy clean modern studio white background teal accent minimal professional wide 16:9"
 
 
-def claude_generate_prompt(topic):
-    """Use Claude API to generate a topic-relevant cinematic image prompt."""
+def claude_generate_prompt(topic, style="dark"):
+    """Use Claude API to generate a topic-relevant image prompt matching the style."""
     if not ANTHROPIC_API_KEY:
         return None
     import urllib.request, json
+    style_desc = STYLES[style]["prompt_style"]
     system = (
-        "You generate short cinematic background image prompts for YouTube thumbnails. "
+        "You generate short background image prompts for YouTube thumbnails. "
         "Given a video topic (possibly in Mongolian), output ONLY a single English prompt "
-        "describing a vivid, atmospheric scene that visually matches the topic. "
-        "Style: dark background, teal accent glow, cinematic, wide 16:9, professional. "
+        "describing a vivid scene that visually matches the topic. "
+        f"Style: {style_desc}. "
         "Keep it under 20 words. No explanations, no quotes—just the prompt."
     )
     payload = json.dumps({
@@ -369,8 +416,7 @@ def generate_illustration(prompt):
 
 
 def remove_face_background(face_path):
-    """Remove background via Replicate rembg, cached per photo."""
-    import urllib.request, base64
+    """Remove background locally via rembg, cached per photo."""
     cache_dir = os.path.join(ILLUSTRATIONS_FOLDER, "nobg")
     os.makedirs(cache_dir, exist_ok=True)
     face_name = os.path.splitext(os.path.basename(face_path))[0]
@@ -382,61 +428,95 @@ def remove_face_background(face_path):
             return Image.open(cache).convert("RGBA")
         print(f"    Photo updated — re-processing bg removal...")
     print(f"    Removing background: {face_name}...")
-    ext = os.path.splitext(face_path)[1].lower()
-    mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
-    with open(face_path, "rb") as f:
-        data_uri = f"data:{mime};base64,{base64.b64encode(f.read()).decode()}"
-    REMBG_VERSION = "fb8af171cfa1616ddcf1242c093f9c46bcada5ad4cf6f2fbe8b81b330ec5c003"
-    result = _replicate_post_versioned(REMBG_VERSION, {"image": data_uri}, label="BG removal")
-    if not result:
+    try:
+        from rembg import remove as rembg_remove
+    except ImportError:
+        print("    rembg not installed — skipping bg removal")
         return None
-    out = result["output"]
-    url = out[0] if isinstance(out, list) else out
-    urllib.request.urlretrieve(url, cache)
-    return Image.open(cache).convert("RGBA")
+    corrected = ImageOps.exif_transpose(Image.open(face_path))
+    result = rembg_remove(corrected)
+    result.save(cache)
+    return result.convert("RGBA")
+
+
+# =============================================================
+# LAYOUT HELPERS
+# =============================================================
+
+def detect_category_tag(topic):
+    """Auto-detect a short category tag from the topic text."""
+    t = topic.lower()
+    if any(k in t for k in ["chatgpt", "claude", "gemini", "perplexity", "ai", "хиймэл"]):
+        return "AI"
+    if any(k in t for k in ["labor", "ажилтн", "ажил", "гарын авлага", "сургалт", "hr"]):
+        return "HR"
+    if any(k in t for k in ["маркетинг"]):
+        return "МАРКЕТИНГ"
+    if any(k in t for k in ["санхүү", "мөнгө"]):
+        return "САНХҮҮ"
+    if any(k in t for k in ["бичлэг", "видео"]):
+        return "ВИДЕО"
+    if any(k in t for k in ["код", "програм"]):
+        return "КОД"
+    return "LAMBDA"
+
+
+def _draw_line_with_highlight(draw, line, hl_upper, lx, ly, font, main_color, hl_color):
+    """Draw a text line, coloring any occurrence of hl_upper in hl_color."""
+    idx = line.upper().find(hl_upper)
+    if idx == -1 or not hl_upper:
+        draw.text((lx, ly), line, font=font, fill=main_color)
+        return
+    before  = line[:idx]
+    keyword = line[idx:idx+len(hl_upper)]
+    after   = line[idx+len(hl_upper):]
+    cx = lx
+    if before:
+        bb = draw.textbbox((0, 0), before, font=font)
+        draw.text((cx, ly), before, font=font, fill=main_color)
+        cx += bb[2] - bb[0]
+    bb = draw.textbbox((0, 0), keyword, font=font)
+    draw.text((cx, ly), keyword, font=font, fill=hl_color)
+    cx += bb[2] - bb[0]
+    if after:
+        draw.text((cx, ly), after, font=font, fill=main_color)
 
 
 # =============================================================
 # THUMBNAIL GENERATOR
 # =============================================================
 
-def generate_thumbnail(name, topic, topic_highlight, face_path, output_path, illustration_prompt=""):
+def generate_thumbnail(name, topic, topic_highlight, face_path, output_path, illustration_prompt="", style="dark"):
     """
     Viral-style layout:
-      - Clean dark gradient background
-      - Face: left side, large (almost full height)
-      - Right side: name pill → big topic text → bold teal highlight box
-      - Lambda logo: top-right
+      - Illustration background (topic-relevant) with dark or bright overlay
+      - Face: left side, large
+      - Right side: name pill → topic text → teal highlight box
+      - Lambda logo: top-left
     """
+    s = STYLES[style]
 
     # --- Background ---
     if USE_ILLUSTRATIONS and ILLUSTRATION_AS_BG and illustration_prompt:
         illus_img = generate_illustration(illustration_prompt)
         if illus_img:
             bg = illus_img.resize((WIDTH, HEIGHT), Image.LANCZOS).convert("RGBA")
-            # Dark overlay using brand BG_COLOR so face and text pop
-            dark_over = Image.new("RGBA", (WIDTH, HEIGHT), (*hex_to_rgb(BG_COLOR), BG_OVERLAY_OPACITY))
-            bg = Image.alpha_composite(bg, dark_over)
+            overlay = Image.new("RGBA", (WIDTH, HEIGHT), s["overlay"])
+            bg = Image.alpha_composite(bg, overlay)
         else:
-            bg = Image.new("RGBA", (WIDTH, HEIGHT), hex_to_rgba(BG_COLOR))
+            bg = Image.new("RGBA", (WIDTH, HEIGHT), (*hex_to_rgb(s["bg_color"]), 255))
     elif USE_GRADIENT_BG:
-        bg = create_gradient_bg(face_x_center=WIDTH // 4)
+        bg = create_gradient_bg(face_x_center=WIDTH // 4, style=style)
     else:
-        bg = Image.new("RGBA", (WIDTH, HEIGHT), hex_to_rgba(BG_COLOR))
+        bg = Image.new("RGBA", (WIDTH, HEIGHT), (*hex_to_rgb(s["bg_color"]), 255))
 
-    # Add gradient glow effects on top of illustration
+    # Blend style-appropriate glow on top of illustration
     if USE_GRADIENT_BG and USE_ILLUSTRATIONS and ILLUSTRATION_AS_BG:
-        glow = create_gradient_bg(face_x_center=WIDTH // 4)
-        # Blend glow lightly on top — extract only the glow layers, not the opaque base
         glow_overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-        # Left face glow
-        gd = ImageDraw.Draw(glow_overlay)
         cx, cy = WIDTH // 4, HEIGHT // 2 + 40
-        bg_rgb = hex_to_rgb(BG_COLOR)
-        glow_face_color = (bg_rgb[0]*2+4, bg_rgb[1]*3+1, bg_rgb[2]*2+10, 80)
-        gd.ellipse([cx-320, cy-320, cx+320, cy+320], fill=glow_face_color)
-        glow_overlay = glow_overlay.filter(ImageFilter.GaussianBlur(80))
-        bg = Image.alpha_composite(bg, glow_overlay)
+        fill = (10, 25, 50, 70) if style == "dark" else (*hex_to_rgb(ACCENT_COLOR), 30)
+        ImageDraw.Draw(glow_overlay).ellipse([cx-320, cy-320, cx+320, cy+320], fill=fill)
+        bg = Image.alpha_composite(bg, glow_overlay.filter(ImageFilter.GaussianBlur(80)))
 
     # --- Face photo ---
     face_img = None
@@ -444,15 +524,14 @@ def generate_thumbnail(name, topic, topic_highlight, face_path, output_path, ill
         if USE_BG_REMOVAL and REPLICATE_API_TOKEN:
             face_img = remove_face_background(face_path)
         if face_img is None:
-            face_img = Image.open(face_path).convert("RGBA")
+            face_img = ImageOps.exif_transpose(Image.open(face_path)).convert("RGBA")
 
         target_h = int(HEIGHT * FACE_HEIGHT_RATIO)
         target_w = int(face_img.width * target_h / face_img.height)
         face_img = face_img.resize((target_w, target_h), Image.LANCZOS)
 
-        # White stroke outline around the cutout
         if USE_BG_REMOVAL:
-            face_img = add_stroke(face_img, stroke_width=10, color=(255, 255, 255, 255))
+            face_img = add_stroke(face_img, stroke_width=8, color=s["face_stroke"])
 
         # Anchor: position based on config
         face_x = FACE_X_OFFSET
@@ -464,119 +543,115 @@ def generate_thumbnail(name, topic, topic_highlight, face_path, output_path, ill
     draw = ImageDraw.Draw(bg)
 
     # --- Text layout — right column ---
-    # Right column: from 48% to 97% of width
-    COL_X  = int(WIDTH * 0.48)
+    COL_X  = int(WIDTH * 0.46)
     COL_W  = int(WIDTH * 0.97) - COL_X
     COL_CX = COL_X + COL_W // 2
 
-    name_font      = load_font(NAME_FONT_SIZE)
-    topic_font     = load_font(TOPIC_FONT_SIZE)
-    highlight_font = load_font(HIGHLIGHT_FONT_SIZE)
+    tag_font   = load_font(21)
+    topic_font = load_font(TOPIC_FONT_SIZE)
+    name_font  = load_font(26)
+    badge_font = load_font(28)
 
-    # Wrap main topic text
-    topic_lines = wrap_text(topic.upper(), topic_font, COL_W, draw)
+    main_color   = s["topic_color"]
+    stroke_color = s["text_stroke"]
+    accent_rgba  = hex_to_rgba(ACCENT_COLOR)
+    dark_fill    = (*hex_to_rgb("#1a1a2e"), 230)
+
+    # ── Topic font auto-shrink ──────────────────────────────────────────
     topic_line_h = TOPIC_FONT_SIZE + 14
-
-    # Measure name pill — subtract font's internal top offset for true centering
-    nm = name.upper()
-    nb = draw.textbbox((0, 0), nm, font=name_font)
-    nm_w  = nb[2] - nb[0]
-    nm_h  = nb[3] - nb[1]
-    nm_dy = nb[1]           # hidden ascender offset PIL adds above visible text
-    pill_px, pill_py = 24, 11
-    pill_w = nm_w + pill_px * 2
-    pill_h = nm_h + pill_py * 2
-
-    hl = topic_highlight.upper()
-    box_px, box_py = 30, 16
-
-    # ── Topic font size logic ───────────────────────────────────────────
-    # >6 words → shrink 20px; further shrink if any line still overflows
-    word_count = len(topic.split())
-    if word_count > 6:
-        topic_size = max(44, TOPIC_FONT_SIZE - 20)
+    if len(topic.split()) > 6:
+        topic_size = max(40, TOPIC_FONT_SIZE - 18)
         topic_font = load_font(topic_size)
-        topic_lines = wrap_text(topic.upper(), topic_font, COL_W, draw)
         topic_line_h = topic_size + 12
+    topic_lines = wrap_text(topic.upper(), topic_font, COL_W, draw)
     for line in topic_lines:
         lb = draw.textbbox((0, 0), line, font=topic_font)
         if lb[2] - lb[0] > COL_W:
             cur_size = getattr(topic_font, 'size', TOPIC_FONT_SIZE)
-            shrunk = load_font(max(40, cur_size - 14))
-            topic_lines = wrap_text(topic.upper(), shrunk, COL_W, draw)
-            topic_font = shrunk
-            topic_line_h = max(40, cur_size - 14) + 12
+            topic_font = load_font(max(36, cur_size - 12))
+            topic_lines = wrap_text(topic.upper(), topic_font, COL_W, draw)
+            topic_line_h = max(36, cur_size - 12) + 12
             break
 
-    # ── Highlight box logic ─────────────────────────────────────────────
-    # Wrap highlight text into multiple lines if >5 words or too wide;
-    # shrink font until every line fits within the column.
-    hl_size = HIGHLIGHT_FONT_SIZE
-    hl_max_w = COL_W - box_px * 2
-    hl_lines = wrap_text(hl, highlight_font, hl_max_w, draw)
-    # Shrink until all lines fit
-    while True:
-        too_wide = any(
-            draw.textbbox((0,0), ln, font=highlight_font)[2]
-            - draw.textbbox((0,0), ln, font=highlight_font)[0] > hl_max_w
-            for ln in hl_lines
-        )
-        if not too_wide or hl_size <= 36:
-            break
-        hl_size -= 6
-        highlight_font = load_font(hl_size)
-        hl_lines = wrap_text(hl, highlight_font, hl_max_w, draw)
+    # ── Measure all elements ────────────────────────────────────────────
+    cat_tag  = detect_category_tag(topic)
+    hl_upper = topic_highlight.upper()
+    pad_tx, pad_ty = 14, 7
 
-    # Measure the highlight box dimensions (tallest line × number of lines)
-    sample_h = draw.textbbox((0,0), hl_lines[0], font=highlight_font)
-    hl_line_h = (sample_h[3] - sample_h[1]) + 10
-    widest = max(
-        draw.textbbox((0,0), ln, font=highlight_font)[2]
-        - draw.textbbox((0,0), ln, font=highlight_font)[0]
-        for ln in hl_lines
-    )
-    box_w = widest + box_px * 2
-    box_h = hl_line_h * len(hl_lines) + box_py * 2
+    def _tag_dims(text, font):
+        bb = draw.textbbox((0, 0), text, font=font)
+        return bb[2]-bb[0] + pad_tx*2, bb[3]-bb[1] + pad_ty*2, bb[1]
 
-    # Total block height and vertical centering
-    gap1, gap2 = 20, 22
-    total_h = pill_h + gap1 + len(topic_lines)*topic_line_h + gap2 + box_h
+    cat_w, tag_h, _    = _tag_dims(cat_tag, tag_font)
+    hl_w,  _,     _    = _tag_dims(hl_upper, tag_font)
+    tags_total_w = cat_w + 10 + hl_w
+
+    nb = draw.textbbox((0, 0), name.upper(), font=name_font)
+    name_h = nb[3] - nb[1]
+
+    dot_size, dot_gap = 14, 10
+    bb2 = draw.textbbox((0, 0), hl_upper, font=badge_font)
+    badge_pad_x, badge_pad_y = 20, 12
+    badge_w = dot_size + dot_gap + (bb2[2]-bb2[0]) + badge_pad_x*2
+    badge_h = max(bb2[3]-bb2[1], dot_size) + badge_pad_y*2
+
+    gap1, gap2, gap3 = 14, 12, 16
+    topic_block_h = len(topic_lines) * topic_line_h
+    total_h = tag_h + gap1 + topic_block_h + gap2 + name_h + gap3 + badge_h
     block_y = max(20, min((HEIGHT - total_h) // 2, HEIGHT - total_h - 20))
 
-    # 1. Name pill
-    pill_x = COL_CX - pill_w // 2
-    draw_rounded_rect(draw, [pill_x, block_y, pill_x+pill_w, block_y+pill_h],
-                      radius=pill_h//2, fill=hex_to_rgba(ACCENT_COLOR))
-    draw.text((pill_x+pill_px, block_y+pill_py - nm_dy), nm, font=name_font,
-              fill=hex_to_rgba(ACCENT_DARK))
+    # 1. Tag row — category (teal) + highlight keyword (dark)
+    tags_x = COL_CX - tags_total_w // 2
+    # Category tag
+    draw_rounded_rect(draw, [tags_x, block_y, tags_x+cat_w, block_y+tag_h],
+                      radius=6, fill=accent_rgba)
+    cb = draw.textbbox((0, 0), cat_tag, font=tag_font)
+    draw.text((tags_x+pad_tx, block_y+pad_ty - cb[1]), cat_tag, font=tag_font,
+              fill=(255, 255, 255, 255))
+    # Highlight tag (dark)
+    hl_tag_x = tags_x + cat_w + 10
+    draw_rounded_rect(draw, [hl_tag_x, block_y, hl_tag_x+hl_w, block_y+tag_h],
+                      radius=6, fill=dark_fill)
+    hb = draw.textbbox((0, 0), hl_upper, font=tag_font)
+    draw.text((hl_tag_x+pad_tx, block_y+pad_ty - hb[1]), hl_upper, font=tag_font,
+              fill=(255, 255, 255, 255))
 
-    # 2. Topic lines (white, bold outline)
-    ty = block_y + pill_h + gap1
+    # 2. Topic lines — keyword highlighted in accent color
+    ty = block_y + tag_h + gap1
     for i, line in enumerate(topic_lines):
-        lb = draw.textbbox((0, 0), line, font=topic_font)
-        lw = lb[2]-lb[0]
-        lx = COL_CX - lw // 2
-        ly = ty + i * topic_line_h
-        for dx, dy in [(-3,0),(3,0),(0,-3),(0,3),(-3,-3),(3,-3),(-3,3),(3,3)]:
-            draw.text((lx+dx, ly+dy), line, font=topic_font, fill=(0,0,0,230))
-        draw.text((lx, ly), line, font=topic_font, fill=TOPIC_COLOR)
+        lb  = draw.textbbox((0, 0), line, font=topic_font)
+        lw  = lb[2] - lb[0]
+        lx  = COL_CX - lw // 2
+        ly  = ty + i * topic_line_h
+        # Stroke pass
+        for dx, dy in [(-2,0),(2,0),(0,-2),(0,2)]:
+            draw.text((lx+dx, ly+dy), line, font=topic_font, fill=stroke_color)
+        # Draw with teal highlight on matching word
+        _draw_line_with_highlight(draw, line, hl_upper, lx, ly,
+                                  topic_font, main_color, accent_rgba)
 
-    # 3. Teal highlight box — wraps if text is long
-    hy = ty + len(topic_lines) * topic_line_h + gap2
-    box_x = COL_CX - box_w // 2
-    draw_rounded_rect(draw, [box_x, hy, box_x+box_w, hy+box_h],
-                      radius=14, fill=hex_to_rgba(ACCENT_COLOR))
-    for i, ln in enumerate(hl_lines):
-        lb = draw.textbbox((0,0), ln, font=highlight_font)
-        lw = lb[2]-lb[0]
-        lx = box_x + (box_w - lw) // 2
-        ly = hy + box_py + i * hl_line_h
-        draw.text((lx, ly), ln, font=highlight_font, fill=hex_to_rgba(ACCENT_DARK))
+    # 3. Name — smaller subtitle
+    ny  = ty + topic_block_h + gap2
+    name_col = (200, 210, 215, 255) if style == "dark" else (*hex_to_rgb(s["topic_color"]), 255)
+    nm_bb = draw.textbbox((0, 0), name.upper(), font=name_font)
+    nx = COL_CX - (nm_bb[2]-nm_bb[0]) // 2
+    draw.text((nx, ny - nm_bb[1]), name.upper(), font=name_font, fill=name_col)
 
-    # --- Logo: top-left ---
+    # 4. Tool badge — dark pill with teal dot + keyword
+    by  = ny + name_h + gap3
+    bx  = COL_CX - badge_w // 2
+    draw_rounded_rect(draw, [bx, by, bx+badge_w, by+badge_h], radius=8, fill=dark_fill)
+    dot_x = bx + badge_pad_x
+    dot_y = by + (badge_h - dot_size) // 2
+    draw.ellipse([dot_x, dot_y, dot_x+dot_size, dot_y+dot_size], fill=accent_rgba)
+    btb = draw.textbbox((0, 0), hl_upper, font=badge_font)
+    draw.text((dot_x+dot_size+dot_gap, by+badge_pad_y - btb[1]),
+              hl_upper, font=badge_font, fill=(255, 255, 255, 255))
+
+    # --- Logo: top-right ---
     if LOGO_PATH and os.path.exists(LOGO_PATH):
-        logo = prepare_logo(LOGO_PATH, LOGO_SIZE)
-        bg.paste(logo, (24, 14), logo)
+        logo = prepare_logo(LOGO_PATH, LOGO_SIZE, recolor=s["logo_color"])
+        bg.paste(logo, (20, 14), logo)
 
     bg.convert("RGB").save(output_path, "PNG", quality=95)
 
@@ -598,7 +673,11 @@ def main():
         return
 
     with open(CSV_FILE, "r", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+        content = (f.read()
+                   .replace('\u201c', '"').replace('\u201d', '"')   # " "  → "
+                   .replace('\u2018', "'").replace('\u2019', "'"))  # ' '  → '
+    import io
+    rows = list(csv.DictReader(io.StringIO(content)))
 
     if not rows:
         print("CSV is empty.")
@@ -607,25 +686,33 @@ def main():
     print(f"\nGenerating {len(rows)} thumbnails...\n")
 
     for i, row in enumerate(rows, 1):
-        name      = (row.get("name") or "").strip()
-        topic     = (row.get("topic") or "").strip()
-        highlight = (row.get("topic_highlight") or "").strip()
-        photo     = (row.get("photo_filename") or "").strip()
+        name      = (row.get("name") or "").strip().strip("'")
+        topic     = (row.get("topic") or "").strip().strip("'")
+        highlight = (row.get("topic_highlight") or "").strip().strip("'")
+        photo     = (row.get("photo_filename") or "").strip().strip("'")
         face_path = os.path.join(FACES_FOLDER, photo)
 
         if not highlight:
             highlight = auto_extract_highlight(topic)
 
+        # Pick style: alternate, random, or fixed
+        if STYLE_MODE == "alternate":
+            style = "dark" if i % 2 == 1 else "bright"
+        elif STYLE_MODE == "random":
+            style = random.choice(["dark", "bright"])
+        else:
+            style = STYLE_MODE  # "dark" or "bright" fixed
+
         illus_prompt = (row.get("illustration_prompt") or "").strip()
         if not illus_prompt:
-            illus_prompt = claude_generate_prompt(topic) or auto_generate_prompt(topic)
+            illus_prompt = claude_generate_prompt(topic, style) or auto_generate_prompt(topic, style)
 
         safe = name.lower().replace(" ", "_").replace("/", "_")
         out  = os.path.join(OUTPUT_FOLDER, f"{i:03d}_{safe}.png")
 
         label = "[auto highlight]" if not row.get("topic_highlight", "").strip() else ""
-        print(f"  [{i:3d}/{len(rows)}] {name} — {topic}  {label}")
-        generate_thumbnail(name, topic, highlight, face_path, out, illus_prompt)
+        print(f"  [{i:3d}/{len(rows)}] {name} — {topic}  [{style}]  {label}")
+        generate_thumbnail(name, topic, highlight, face_path, out, illus_prompt, style=style)
 
     print(f"\nDone! {len(rows)} thumbnails saved to '{OUTPUT_FOLDER}/'\n")
 
